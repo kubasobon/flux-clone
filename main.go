@@ -168,6 +168,9 @@ func helmchartURL() (string, error) {
 		return "", fmt.Errorf(".status.url not set")
 	}
 
+	// get rid of in-cluster service address
+	urlElements := strings.SplitN(url, "/", 4)
+	url = fmt.Sprintf("http://localhost:%d/%s", localPort, urlElements[len(urlElements)-1])
 	return url, nil
 }
 
