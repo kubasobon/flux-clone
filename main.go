@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -9,11 +10,16 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/fluxcd/pkg/untar"
 	flag "github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 var (
@@ -23,22 +29,30 @@ var (
 	servicePort      int
 	revision         string
 
-	repoName      string
-	repoNamespace string
+	sourceType      string
+	sourceName      string
+	sourceNamespace string
+
+	allowedTypes = []string{"gitrepository", "helmchart"}
 )
 
 func main() {
+	allowedTypesString := strings.Join(allowedTypes, ", ")
 	flag.IntVar(&localPort, "local-port", 8080, "local port for port-forward")
-	flag.StringVar(&repoName, "repo-name", "", "GitRepository name")
-	flag.StringVar(&repoNamespace, "repo-namespace", "flux-system", "GitRepository namespace")
-	flag.StringVar(&revision, "revision", "latest", "GitRepository revision")
+	flag.StringVar(&sourceName, "name", "", "Source name")
+	flag.StringVar(&sourceNamespace, "namespace", "flux-system", "Source namespace")
+	flag.StringVar(&revision, "revision", "latest", "Source revision")
 	flag.StringVar(&serviceName, "service-name", "source-controller", "service name")
 	flag.StringVar(&serviceNamespace, "service-namespace", "flux-system", "service namespace")
 	flag.IntVar(&servicePort, "service-port", 80, "service port for port-forward")
+	flag.StringVar(&sourceType, "source-type", "gitrepository", "type of source to use: "+allowedTypesString)
 	flag.Parse()
 
-	if repoName == "" || repoNamespace == "" {
-		log.Fatal("--repo-name and --repo-namespace flags are mandatory")
+	if !contains(allowedTypes, sourceType) {
+		log.Fatalf("--source-type %q not allowed, must be one of: %s", sourceType, allowedTypesString)
+	}
+	if sourceName == "" || sourceNamespace == "" {
+		log.Fatal("--name and --namespace flags are mandatory")
 	}
 
 	// Start port forwarding
@@ -80,7 +94,7 @@ func main() {
 	// download and untar the artifact
 	dir, err := os.MkdirTemp(
 		"",
-		fmt.Sprintf("%s-%s-%s-*", repoNamespace, repoName, revision),
+		fmt.Sprintf("%s-%s-%s-*", sourceNamespace, sourceName, revision),
 	)
 	if err != nil {
 		interrupt <- os.Interrupt
@@ -88,9 +102,20 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Println("Downloading and untarring the repo...")
+	log.Println("Downloading and untarring the source...")
 
-	err = downloadRepo(dir)
+	var url string
+	switch sourceType {
+	case "gitrepository":
+		url = gitrepositoryURL()
+	case "helmchart":
+		url, err = helmchartURL()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	err = downloadSource(dir, url)
 	if err != nil {
 		interrupt <- os.Interrupt
 		wg.Wait()
@@ -102,16 +127,53 @@ func main() {
 	wg.Wait()
 }
 
-func downloadRepo(dir string) error {
-	client := &http.Client{Timeout: 15 * time.Second}
-	request, err := http.NewRequest(
-		"GET",
-		fmt.Sprintf(
-			"http://localhost:%d/gitrepository/%s/%s/%s.tar.gz",
-			localPort, repoNamespace, repoName, revision,
-		),
-		nil,
+func gitrepositoryURL() string {
+	return fmt.Sprintf(
+		"http://localhost:%d/%s/%s/%s/%s.tar.gz",
+		localPort, sourceType, sourceNamespace, sourceName, revision,
 	)
+}
+
+func helmchartURL() (string, error) {
+	log.Println("Getting URL from the HelmChart...")
+	c, err := client.New(config.GetConfigOrDie(), client.Options{})
+	if err != nil {
+		return "", err
+	}
+
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "source.toolkit.fluxcd.io",
+		Kind:    "HelmChart",
+		Version: "v1beta1",
+	})
+
+	err = c.Get(
+		context.Background(),
+		client.ObjectKey{
+			Namespace: sourceNamespace,
+			Name:      sourceName,
+		},
+		u,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	url, ok, err := unstructured.NestedString(u.Object, "status", "url")
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf(".status.url not set")
+	}
+
+	return url, nil
+}
+
+func downloadSource(dir, url string) error {
+	client := &http.Client{Timeout: 15 * time.Second}
+	request, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
 	}
@@ -141,4 +203,13 @@ func downloadRepo(dir string) error {
 	log.Printf("Untarred in %q", dir)
 
 	return nil
+}
+
+func contains(slice []string, s string) bool {
+	for _, x := range slice {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
