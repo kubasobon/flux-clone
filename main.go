@@ -171,6 +171,9 @@ func helmchartURL() (string, error) {
 	// get rid of in-cluster service address
 	urlElements := strings.SplitN(url, "/", 4)
 	url = fmt.Sprintf("http://localhost:%d/%s", localPort, urlElements[len(urlElements)-1])
+
+	// change "latest" to required revision
+	url = strings.Replace(url, "latest.tgz", fmt.Sprintf("%s.tgz", revision), 1)
 	return url, nil
 }
 
