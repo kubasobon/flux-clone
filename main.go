@@ -136,7 +136,11 @@ func gitrepositoryURL() string {
 
 func helmchartURL() (string, error) {
 	log.Println("Getting URL from the HelmChart...")
-	c, err := client.New(config.GetConfigOrDie(), client.Options{})
+	conf := config.GetConfigOrDie()
+	// avoid annoying client-side throttling
+	conf.QPS = 50
+	conf.Burst = 100
+	c, err := client.New(conf, client.Options{})
 	if err != nil {
 		return "", err
 	}
